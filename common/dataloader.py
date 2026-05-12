@@ -57,16 +57,10 @@ def create_few_shot_dataset(dataset_name, shots=5, seed=42, device="cuda:0", pat
     new_train_mask = torch.zeros_like(graph_data.train_mask)
 
     if dataset_name == "arxiv":
-        ogb_dataset = PygNodePropPredDataset(name='ogbn-arxiv', transform=T.ToSparseTensor())
-        split_idx = ogb_dataset.get_idx_split()
-
-        official_train_mask = torch.zeros(graph_data.num_nodes, dtype=torch.bool, device=device)
-        official_val_mask = torch.zeros(graph_data.num_nodes, dtype=torch.bool, device=device)
-        official_test_mask = torch.zeros(graph_data.num_nodes, dtype=torch.bool, device=device)
-
-        official_train_mask[split_idx['train'].to(device)] = True
-        official_val_mask[split_idx['valid'].to(device)] = True
-        official_test_mask[split_idx['test'].to(device)] = True
+        # Use official masks already stored in arxiv.pt (from OGB split)
+        official_train_mask = graph_data.train_mask.to(device)
+        official_val_mask = graph_data.val_mask.to(device)
+        official_test_mask = graph_data.test_mask.to(device)
 
         for c in range(num_classes):
             class_mask = (graph_data.y == c) & official_train_mask
