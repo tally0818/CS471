@@ -194,7 +194,9 @@ if __name__ == "__main__":
     parser.add_argument("--label_rate", type=float, default=0.05)
     parser.add_argument("--re_split", type=int, default=0)
     parser.add_argument("--write_result", type=int, default=1)
-    
+    parser.add_argument("--ensemble_k", type=int, default=0,
+                        help="Train K models for ensemble and save with _ensemble{i} suffix. 0 = disabled (default single-model mode)")
+
     args = parser.parse_args()
     print(args)
     
@@ -207,12 +209,15 @@ if __name__ == "__main__":
     final_acc_list, final_macro_f1_list, final_weight_f1_list, timer_list = [], [], [], []
 
     os.makedirs("../results/GNN", exist_ok=True)
-    
+
+    # Determine run count: ensemble_k overrides run_times when ensemble mode is on
+    effective_run_times = args.ensemble_k if args.ensemble_k > 0 else args.run_times
+
     if args.write_result:
-        write_file = open(f"../results/GNN/{args.dataset}_{args.shots}_shot{'' if not args.re_split else '_s'}.csv", 
+        write_file = open(f"../results/GNN/{args.dataset}_{args.shots}_shot{'' if not args.re_split else '_s'}.csv",
                          mode='a', newline='')
-        
-    for i in range(args.run_times):
+
+    for i in range(effective_run_times):
         current_seed = args.seed + i
         set_seed(current_seed)
         print(f"\n=== Running with seed {current_seed} (Run {i+1}/{args.run_times}) ===\n")
@@ -228,7 +233,9 @@ if __name__ == "__main__":
 
         num_classes = print_dataset_stats(graph_data)
 
-        if args.gnn_type == "HeteroGNN":
+        if args.ensemble_k > 0:
+            model_save_path = f"../results/GNN/{args.dataset}_{args.shots}_shot_best_model_ensemble{i}.pt"
+        elif args.gnn_type == "HeteroGNN":
             model_save_path = f"../results/GNN/{args.dataset}_{args.gnn_type}_{args.shots}_shot_best_model_run{i}.pt"
         else:
             model_save_path = f"../results/GNN/{args.dataset}_{args.shots}_shot_best_model_run{i}.pt"
@@ -272,11 +279,12 @@ if __name__ == "__main__":
             )
         
         timer_list.append(training_time)
-        print(f'[Times {i}] Test Acc {best_test_acc:.2f}  Test Macro-F1 {best_test_mac_f1:.2f}  Test Micro-F1 {best_test_weight_f1:.2f} Time {training_time:.3f}s\n')
+        tag = f"Ensemble[{i}]" if args.ensemble_k > 0 else f"Times {i}"
+        print(f'[{tag}] Test Acc {best_test_acc:.2f}  Test Macro-F1 {best_test_mac_f1:.2f}  Test Micro-F1 {best_test_weight_f1:.2f} Time {training_time:.3f}s\n')
         final_acc_list.append(best_test_acc)
         final_macro_f1_list.append(best_test_mac_f1)
         final_weight_f1_list.append(best_test_weight_f1)
-    
+
     acc_mean, acc_std = array_mean_std(final_acc_list)
     macrof1_mean, macrof1_std = array_mean_std(final_macro_f1_list)
     weightf1_mean, weightf1_std = array_mean_std(final_weight_f1_list)

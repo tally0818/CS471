@@ -45,12 +45,12 @@ def load_llm_predictions(llm_predictions_file: str, graph_data) -> Dict[int, int
     
     return llm_predictions_mapped
 
-def find_agreed_and_disagreed_nodes(gnn_predictions, llm_predictions, graph_data):
+def find_agreed_and_disagreed_nodes(gnn_predictions, llm_predictions, graph_data, is_probability=False):
     agreed_nodes = {}
     disagreed_nodes = {}
 
-    gnn_probs = F.softmax(gnn_predictions, dim=1)
-    gnn_preds = gnn_predictions.argmax(dim=1)
+    gnn_probs = gnn_predictions if is_probability else F.softmax(gnn_predictions, dim=1)
+    gnn_preds = gnn_probs.argmax(dim=1)
 
     num_gnn_nodes = gnn_predictions.size(0)
 
@@ -126,10 +126,11 @@ def load_llm_predictions_for_selected(llm_predictions_file: str, selected_node_i
 def filter_disagreed_by_preference(
     disagreed_nodes: Dict[int, Any],
     gnn_predictions: torch.Tensor,
-    confidence_threshold: float
+    confidence_threshold: float,
+    is_probability: bool = False,
 ) -> Dict[int, Any]:
     filtered_disagreed = {}
-    gnn_probs = F.softmax(gnn_predictions, dim=1)
+    gnn_probs = gnn_predictions if is_probability else F.softmax(gnn_predictions, dim=1)
 
     for node_id, triple in disagreed_nodes.items():
         if isinstance(triple, (list, tuple)) and len(triple) >= 2:

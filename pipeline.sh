@@ -10,6 +10,12 @@ DATASET=${1:-"cora"}
 SHOT_COUNT=${2:-"5"}
 SEED=${3:-"42"}
 
+# === Ensemble GNN-as-Judge settings ===
+# Set USE_ENSEMBLE=true and ENSEMBLE_K=3 (or 5) to use multiple GNNs as judges
+USE_ENSEMBLE=${USE_ENSEMBLE:-false}
+ENSEMBLE_K=${ENSEMBLE_K:-3}
+VOTING_METHOD=${VOTING_METHOD:-"soft"}
+
 
 # ===== ENVIRONMENT SETUP =====
 export CUDA_VISIBLE_DEVICES=${VISIBLE_DEVICES:-"0"}
@@ -49,8 +55,28 @@ DPO_DATASET_NAME="${RUN_ID}_dpo"
 DPO_JSON_FILE="$DATASET_DIR/${DPO_DATASET_NAME}.json"
 SFT_DPO_JSON_FILE="$DATASET_DIR/${DPO_DATASET_NAME}_sft.json"
 GNN_MODEL_PATH="$PROJECT_DIR/results/GNN/${DATASET}_${SHOT_COUNT}_shot_best_model_run0.pt"
+GNN_RESULTS_DIR="$PROJECT_DIR/results/GNN"
 
 echo "=== Starting GNN-as-Judge Pipeline for $RUN_ID ==="
+echo "    Ensemble: $USE_ENSEMBLE (K=$ENSEMBLE_K, voting=$VOTING_METHOD)"
+
+# STAGE 0 (optional): Train ensemble GNN models
+if [ "$USE_ENSEMBLE" = "true" ]; then
+  echo "--- Stage 0: Train Ensemble GNN (K=$ENSEMBLE_K) ---"
+  cd "$PROJECT_DIR/GNN"
+  python main.py \
+    --dataset "$DATASET" \
+    --shots "$SHOT_COUNT" \
+    --gnn_type "${GNN_TYPE:-GCN}" \
+    --hidden_dim ${GNN_HIDDEN_DIM:-64} \
+    --n_layers ${GNN_LAYERS:-2} \
+    --epochs 200 \
+    --patience 100 \
+    --seed "$SEED" \
+    --ensemble_k "$ENSEMBLE_K" \
+    --device "cuda:0"
+  cd "$PROJECT_DIR"
+fi
 
 # STAGE 1: Create SFT Dataset
 echo "--- Stage 1: Create SFT Dataset ---"
@@ -187,6 +213,11 @@ CUDA_VISIBLE_DEVICES=0 python src/vllm_infer.py \
 # STAGE 5: Create DPO Dataset using GNN-as-Judge
 echo "--- Stage 5: Create DPO Dataset ---"
 cd "$PROJECT_DIR"
+ENSEMBLE_FLAGS=""
+if [ "$USE_ENSEMBLE" = "true" ]; then
+  ENSEMBLE_FLAGS="--use_ensemble --ensemble_k $ENSEMBLE_K --ensemble_model_dir $GNN_RESULTS_DIR --voting_method $VOTING_METHOD"
+fi
+
 python create_wsft.py \
   --dataset "$DATASET" \
   --selected_nodes_path "${SELECTED_NODES_FILE%.json}_ordered.json" \
@@ -200,7 +231,8 @@ python create_wsft.py \
   --hidden_dim ${GNN_HIDDEN_DIM:-64} \
   --n_layers ${GNN_LAYERS:-2} \
   --seed "$SEED" \
-  --device "cuda:0"
+  --device "cuda:0" \
+  $ENSEMBLE_FLAGS
 
 # Update dataset_info.json for DPO
 python - <<EOF

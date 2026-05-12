@@ -108,6 +108,44 @@ def prepare_dpo_dataset(agreed_nodes, disagreed_nodes, gnn_predictions, graph_da
         json.dump(sft_dataset, f, indent=2)
 
 
+def load_ensemble_predictions(graph_data, args):
+    """Load K GNN checkpoints and return soft-voted probability tensor."""
+    num_classes = 47 if args.dataset == "ogbn-products_subset" else graph_data.y.max().item() + 1
+    ensemble_dir = args.ensemble_model_dir
+    model_paths = []
+    for i in range(args.ensemble_k):
+        path = os.path.join(ensemble_dir, f"{args.dataset}_{args.shots}_shot_best_model_ensemble{i}.pt")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Ensemble checkpoint not found: {path}")
+        model_paths.append(path)
+
+    print(f"[Ensemble] Loading {args.ensemble_k} GNN models from {ensemble_dir}")
+    prob_sum = None
+    for i, path in enumerate(model_paths):
+        model = GNNEncoder(
+            input_dim=graph_data.x.shape[1],
+            hidden_dim=args.hidden_dim,
+            output_dim=num_classes,
+            n_layers=args.n_layers,
+            gnn_type=args.gnn_type,
+        ).to(args.device)
+        model.load_state_dict(torch.load(path, map_location=args.device))
+        model.eval()
+        with torch.no_grad():
+            logits = model(graph_data.x, graph_data.edge_index)
+            probs = F.softmax(logits, dim=1)
+        if prob_sum is None:
+            prob_sum = probs
+        else:
+            prob_sum = prob_sum + probs
+        print(f"  Loaded ensemble member {i}: {path}")
+        del model
+
+    ensemble_probs = prob_sum / args.ensemble_k
+    print(f"[Ensemble] Soft voting done — avg of {args.ensemble_k} models")
+    return ensemble_probs
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, required=True)
@@ -124,10 +162,22 @@ def main():
     parser.add_argument("--path_prefix", type=str, default=".")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu")
+    # Ensemble flags
+    parser.add_argument("--use_ensemble", action="store_true", default=False,
+                        help="Use multiple GNN ensemble instead of single model")
+    parser.add_argument("--ensemble_k", type=int, default=3,
+                        help="Number of GNN models in ensemble (3 or 5)")
+    parser.add_argument("--ensemble_model_dir", type=str, default=None,
+                        help="Directory containing ensemble checkpoints (default: results/GNN)")
+    parser.add_argument("--voting_method", type=str, default="soft", choices=["soft"],
+                        help="Ensemble voting method (currently: soft)")
     args = parser.parse_args()
 
     set_seed(args.seed)
-    
+
+    if args.ensemble_model_dir is None:
+        args.ensemble_model_dir = os.path.join(args.path_prefix, "results", "GNN")
+
     if args.shots:
         graph_data = create_few_shot_dataset(args.dataset, shots=args.shots, seed=args.seed, device=args.device, path_prefix=args.path_prefix)
     else:
@@ -142,19 +192,26 @@ def main():
         num_classes = 47
     else:
         num_classes = graph_data.y.max().item() + 1
-        
-    gnn_model = GNNEncoder(
-        input_dim=graph_data.x.shape[1],
-        hidden_dim=args.hidden_dim,
-        output_dim=num_classes,
-        n_layers=args.n_layers,
-        gnn_type=args.gnn_type,
-    ).to(args.device)
-    gnn_model.load_state_dict(torch.load(args.pretrained_model, map_location=args.device))
-    gnn_model.eval()
 
-    with torch.no_grad():
-        gnn_predictions = gnn_model(graph_data.x, graph_data.edge_index)
+    # --- Ensemble vs Single GNN ---
+    is_prob = False
+    if args.use_ensemble:
+        print(f"[Ensemble mode] K={args.ensemble_k}, voting={args.voting_method}")
+        gnn_predictions = load_ensemble_predictions(graph_data, args)
+        is_prob = True  # gnn_predictions is already a probability tensor
+        gnn_model = None  # no single model for retrain
+    else:
+        gnn_model = GNNEncoder(
+            input_dim=graph_data.x.shape[1],
+            hidden_dim=args.hidden_dim,
+            output_dim=num_classes,
+            n_layers=args.n_layers,
+            gnn_type=args.gnn_type,
+        ).to(args.device)
+        gnn_model.load_state_dict(torch.load(args.pretrained_model, map_location=args.device))
+        gnn_model.eval()
+        with torch.no_grad():
+            gnn_predictions = gnn_model(graph_data.x, graph_data.edge_index)
 
     print(f"Loading LLM predictions from {args.llm_predictions}")
     llm_predictions = load_llm_predictions_for_selected(args.llm_predictions, selected_nodes_ids, graph_data)
@@ -163,22 +220,28 @@ def main():
     covered_ids = [int(nid) for nid in selected_nodes_ids if int(nid) in llm_predictions]
     selected_nodes_ids = covered_ids
 
-    agreed_nodes, disagreed_nodes = find_agreed_and_disagreed_nodes(gnn_predictions, llm_predictions, graph_data)
+    agreed_nodes, disagreed_nodes = find_agreed_and_disagreed_nodes(
+        gnn_predictions, llm_predictions, graph_data, is_probability=is_prob)
     agreed_nodes = {nid: agreed_nodes[nid] for nid in selected_nodes_ids if nid in agreed_nodes}
     disagreed_nodes = {nid: disagreed_nodes[nid] for nid in selected_nodes_ids if nid in disagreed_nodes}
     print(f"Initial: {len(agreed_nodes)} agreed, {len(disagreed_nodes)} disagreed")
 
-    if len(agreed_nodes) > 0:
+    if len(agreed_nodes) > 0 and gnn_model is not None:
         print(f"Retraining GNN on {len(agreed_nodes)} agreed nodes...")
         retrain_gnn_on_agreed(gnn_model, graph_data, agreed_nodes, args.device, lr=1e-3, epochs=50)
         with torch.no_grad():
             gnn_predictions = gnn_model(graph_data.x, graph_data.edge_index)
-        agreed_nodes_all, disagreed_nodes_all = find_agreed_and_disagreed_nodes(gnn_predictions, llm_predictions, graph_data)
+        is_prob = False  # retrained single model → logits again
+        agreed_nodes_all, disagreed_nodes_all = find_agreed_and_disagreed_nodes(
+            gnn_predictions, llm_predictions, graph_data, is_probability=is_prob)
         agreed_nodes = {nid: agreed_nodes_all[nid] for nid in selected_nodes_ids if nid in agreed_nodes_all}
         disagreed_nodes = {nid: disagreed_nodes_all[nid] for nid in selected_nodes_ids if nid in disagreed_nodes_all}
         print(f"After retrain: {len(agreed_nodes)} agreed, {len(disagreed_nodes)} disagreed")
+    elif len(agreed_nodes) > 0 and args.use_ensemble:
+        print("[Ensemble mode] Skipping single-model retrain — using ensemble probs directly")
 
-    final_disagreed_nodes = filter_disagreed_by_preference(disagreed_nodes, gnn_predictions, args.confidence_threshold)
+    final_disagreed_nodes = filter_disagreed_by_preference(
+        disagreed_nodes, gnn_predictions, args.confidence_threshold, is_probability=is_prob)
     print(f"Disagreed after confidence filter (>={args.confidence_threshold}): {len(final_disagreed_nodes)}")
 
     prepare_dpo_dataset(agreed_nodes, final_disagreed_nodes, gnn_predictions, graph_data, args.dataset, args.dpo_output_path, args.sft_output_path)

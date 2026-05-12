@@ -31,6 +31,11 @@ DATASET=${1:-"cora"}
 SHOTS=${2:-"3"}
 SEED=${3:-"42"}
 
+# === Ensemble GNN-as-Judge settings ===
+USE_ENSEMBLE=${USE_ENSEMBLE:-false}   # true / false
+ENSEMBLE_K=${ENSEMBLE_K:-3}           # 3 or 5
+VOTING_METHOD=${VOTING_METHOD:-"soft"}
+
 # Derived paths
 LF_DIR="$SCRIPT_DIR/LLaMA-Factory"
 PROJECT_DIR="$SCRIPT_DIR"
@@ -54,19 +59,32 @@ conda activate GNNJudge
 # =====================================================================
 # STAGE 0: Train GNN (judge model)
 # =====================================================================
-echo "=== Stage 0: Train GNN ==="
+echo "=== Stage 0: Train GNN (ensemble=$USE_ENSEMBLE, K=$ENSEMBLE_K) ==="
 cd "$PROJECT_DIR/GNN"
-python main.py \
-  --dataset "$DATASET" \
-  --shots "$SHOTS" \
-  --gnn_type GCN \
-  --hidden_dim 64 \
-  --n_layers 2 \
-  --epochs 200 \
-  --seed "$SEED"
+if [ "$USE_ENSEMBLE" = "true" ]; then
+  python main.py \
+    --dataset "$DATASET" \
+    --shots "$SHOTS" \
+    --gnn_type GCN \
+    --hidden_dim 64 \
+    --n_layers 2 \
+    --epochs 200 \
+    --seed "$SEED" \
+    --ensemble_k "$ENSEMBLE_K"
+else
+  python main.py \
+    --dataset "$DATASET" \
+    --shots "$SHOTS" \
+    --gnn_type GCN \
+    --hidden_dim 64 \
+    --n_layers 2 \
+    --epochs 200 \
+    --seed "$SEED"
+fi
 cd "$PROJECT_DIR"
 
 GNN_MODEL="$PROJECT_DIR/results/GNN/${DATASET}_${SHOTS}_shot_best_model_run0.pt"
+GNN_RESULTS_DIR="$PROJECT_DIR/results/GNN"
 
 # =====================================================================
 # STAGE 1: Create SFT dataset
@@ -222,6 +240,11 @@ DPO_DS="${RUN_ID}_dpo"
 DPO_FILE="$DATASET_DIR/${DPO_DS}.json"
 SFT_DPO_FILE="$DATASET_DIR/${DPO_DS}_sft.json"
 
+ENSEMBLE_FLAGS=""
+if [ "$USE_ENSEMBLE" = "true" ]; then
+  ENSEMBLE_FLAGS="--use_ensemble --ensemble_k $ENSEMBLE_K --ensemble_model_dir $GNN_RESULTS_DIR --voting_method $VOTING_METHOD"
+fi
+
 python create_wsft.py \
   --dataset "$DATASET" \
   --selected_nodes_path "${SELECTED%.json}_ordered.json" \
@@ -235,7 +258,8 @@ python create_wsft.py \
   --hidden_dim 64 \
   --n_layers 2 \
   --seed "$SEED" \
-  --device "cuda:0"
+  --device "cuda:0" \
+  $ENSEMBLE_FLAGS
 
 # Register DPO dataset
 python - <<PYEOF
