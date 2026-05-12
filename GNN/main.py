@@ -196,6 +196,8 @@ if __name__ == "__main__":
     parser.add_argument("--write_result", type=int, default=1)
     parser.add_argument("--ensemble_k", type=int, default=0,
                         help="Train K models for ensemble and save with _ensemble{i} suffix. 0 = disabled (default single-model mode)")
+    parser.add_argument("--hetero_ensemble", action="store_true", default=False,
+                        help="Train GCN, GAT, SAGE separately and save as best_model_{type}.pt")
 
     args = parser.parse_args()
     print(args)
@@ -209,6 +211,39 @@ if __name__ == "__main__":
     final_acc_list, final_macro_f1_list, final_weight_f1_list, timer_list = [], [], [], []
 
     os.makedirs("../results/GNN", exist_ok=True)
+
+    # ========== Hetero-Ensemble mode ==========
+    if args.hetero_ensemble:
+        hetero_types = ["GCN", "GAT", "SAGE"]
+        print(f"\n[Hetero-Ensemble] Training {hetero_types} separately\n")
+        set_seed(args.seed)
+        graph_data = create_few_shot_dataset(
+            args.dataset, shots=args.shots, seed=args.seed,
+            device=device, path_prefix=".."
+        ).to(device)
+        num_classes = print_dataset_stats(graph_data)
+
+        for gtype in hetero_types:
+            set_seed(args.seed)
+            save_path = f"../results/GNN/{args.dataset}_{args.shots}_shot_best_model_{gtype}.pt"
+            model = GNNEncoder(
+                input_dim=graph_data.x.shape[1],
+                hidden_dim=args.hidden_dim,
+                output_dim=num_classes,
+                n_layers=args.n_layers,
+                gnn_type=gtype,
+                dropout=args.dropout,
+            ).to(device)
+            opt = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+            # reuse global gnn_model/optimizer for train_standard_gnn which uses global gnn_train/gnn_test
+            gnn_model = model
+            optimizer = opt
+            best_acc, best_mac, best_w, t = train_standard_gnn(gnn_model, graph_data, optimizer, args, save_path, 0)
+            print(f"[Hetero-Ensemble {gtype}] Acc {best_acc:.2f}  Macro-F1 {best_mac:.2f}  Time {t:.3f}s")
+            print(f"  Saved → {save_path}")
+            del model, opt
+        print("\n[Hetero-Ensemble] All 3 models trained.")
+        sys.exit(0)
 
     # Determine run count: ensemble_k overrides run_times when ensemble mode is on
     effective_run_times = args.ensemble_k if args.ensemble_k > 0 else args.run_times

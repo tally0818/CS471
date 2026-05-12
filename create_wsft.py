@@ -109,7 +109,7 @@ def prepare_dpo_dataset(agreed_nodes, disagreed_nodes, gnn_predictions, graph_da
 
 
 def load_ensemble_predictions(graph_data, args):
-    """Load K GNN checkpoints and return soft-voted probability tensor."""
+    """Load K GNN checkpoints (homo-ensemble) and return soft-voted probability tensor."""
     num_classes = 47 if args.dataset == "ogbn-products_subset" else graph_data.y.max().item() + 1
     ensemble_dir = args.ensemble_model_dir
     model_paths = []
@@ -119,7 +119,7 @@ def load_ensemble_predictions(graph_data, args):
             raise FileNotFoundError(f"Ensemble checkpoint not found: {path}")
         model_paths.append(path)
 
-    print(f"[Ensemble] Loading {args.ensemble_k} GNN models from {ensemble_dir}")
+    print(f"[Homo-Ensemble] Loading {args.ensemble_k} GNN models from {ensemble_dir}")
     prob_sum = None
     for i, path in enumerate(model_paths):
         model = GNNEncoder(
@@ -142,7 +142,45 @@ def load_ensemble_predictions(graph_data, args):
         del model
 
     ensemble_probs = prob_sum / args.ensemble_k
-    print(f"[Ensemble] Soft voting done — avg of {args.ensemble_k} models")
+    print(f"[Homo-Ensemble] Soft voting done — avg of {args.ensemble_k} models")
+    return ensemble_probs
+
+
+def load_hetero_ensemble_predictions(graph_data, args):
+    """Load GCN/GAT/SAGE checkpoints and return soft-voted probability tensor."""
+    num_classes = 47 if args.dataset == "ogbn-products_subset" else graph_data.y.max().item() + 1
+    hetero_types = args.hetero_models  # e.g. ["GCN", "GAT", "SAGE"]
+    ensemble_dir = args.ensemble_model_dir
+
+    print(f"[Hetero-Ensemble] Loading {hetero_types} from {ensemble_dir}")
+    prob_sum = None
+    count = 0
+    for gtype in hetero_types:
+        path = os.path.join(ensemble_dir, f"{args.dataset}_{args.shots}_shot_best_model_{gtype}.pt")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Hetero-ensemble checkpoint not found: {path}")
+        model = GNNEncoder(
+            input_dim=graph_data.x.shape[1],
+            hidden_dim=args.hidden_dim,
+            output_dim=num_classes,
+            n_layers=args.n_layers,
+            gnn_type=gtype,
+        ).to(args.device)
+        model.load_state_dict(torch.load(path, map_location=args.device))
+        model.eval()
+        with torch.no_grad():
+            logits = model(graph_data.x, graph_data.edge_index)
+            probs = F.softmax(logits, dim=1)
+        if prob_sum is None:
+            prob_sum = probs
+        else:
+            prob_sum = prob_sum + probs
+        count += 1
+        print(f"  Loaded {gtype}: {path}")
+        del model
+
+    ensemble_probs = prob_sum / count
+    print(f"[Hetero-Ensemble] Soft voting done — avg of {count} models ({hetero_types})")
     return ensemble_probs
 
 
@@ -169,8 +207,11 @@ def main():
                         help="Number of GNN models in ensemble (3 or 5)")
     parser.add_argument("--ensemble_model_dir", type=str, default=None,
                         help="Directory containing ensemble checkpoints (default: results/GNN)")
-    parser.add_argument("--voting_method", type=str, default="soft", choices=["soft"],
-                        help="Ensemble voting method (currently: soft)")
+    parser.add_argument("--voting_method", type=str, default="soft", choices=["soft", "hard"],
+                        help="Ensemble voting method")
+    # Hetero-Ensemble flags
+    parser.add_argument("--hetero_models", type=str, nargs="+", default=None,
+                        help="GNN types for hetero-ensemble, e.g. --hetero_models GCN GAT SAGE")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -193,13 +234,18 @@ def main():
     else:
         num_classes = graph_data.y.max().item() + 1
 
-    # --- Ensemble vs Single GNN ---
+    # --- Hetero-Ensemble vs Homo-Ensemble vs Single GNN ---
     is_prob = False
-    if args.use_ensemble:
-        print(f"[Ensemble mode] K={args.ensemble_k}, voting={args.voting_method}")
+    if args.hetero_models:
+        print(f"[Hetero-Ensemble mode] models={args.hetero_models}, voting={args.voting_method}")
+        gnn_predictions = load_hetero_ensemble_predictions(graph_data, args)
+        is_prob = True
+        gnn_model = None
+    elif args.use_ensemble:
+        print(f"[Homo-Ensemble mode] K={args.ensemble_k}, voting={args.voting_method}")
         gnn_predictions = load_ensemble_predictions(graph_data, args)
-        is_prob = True  # gnn_predictions is already a probability tensor
-        gnn_model = None  # no single model for retrain
+        is_prob = True
+        gnn_model = None
     else:
         gnn_model = GNNEncoder(
             input_dim=graph_data.x.shape[1],
@@ -237,7 +283,7 @@ def main():
         agreed_nodes = {nid: agreed_nodes_all[nid] for nid in selected_nodes_ids if nid in agreed_nodes_all}
         disagreed_nodes = {nid: disagreed_nodes_all[nid] for nid in selected_nodes_ids if nid in disagreed_nodes_all}
         print(f"After retrain: {len(agreed_nodes)} agreed, {len(disagreed_nodes)} disagreed")
-    elif len(agreed_nodes) > 0 and args.use_ensemble:
+    elif len(agreed_nodes) > 0 and (args.use_ensemble or args.hetero_models):
         print("[Ensemble mode] Skipping single-model retrain — using ensemble probs directly")
 
     final_disagreed_nodes = filter_disagreed_by_preference(
