@@ -144,8 +144,8 @@ def train_standard_gnn(gnn_model, graph_data, optimizer, args, model_save_path, 
     st_time, counter = time.time(), 0
 
     for epoch in range(1, args.epochs+1):
-        cur_loss = gnn_train()
-        [train_acc, val_acc, test_acc], [train_mac_f1, val_mac_f1, test_mac_f1], [train_weight_f1, val_weight_f1, test_weight_f1] = gnn_test()
+        cur_loss = gnn_train_fullbatch(gnn_model, graph_data, optimizer)
+        [train_acc, val_acc, test_acc], [train_mac_f1, val_mac_f1, test_mac_f1], [train_weight_f1, val_weight_f1, test_weight_f1] = gnn_test_fullbatch(gnn_model, graph_data)
         
         if val_acc > best_eval_acc:
             best_eval_acc, best_test_acc = val_acc, test_acc
@@ -225,6 +225,7 @@ if __name__ == "__main__":
 
         for gtype in hetero_types:
             set_seed(args.seed)
+            print(f"[Hetero-Ensemble {gtype}] Using seed {args.seed}")
             save_path = f"../results/GNN/{args.dataset}_{args.shots}_shot_best_model_{gtype}.pt"
             model = GNNEncoder(
                 input_dim=graph_data.x.shape[1],
@@ -235,10 +236,7 @@ if __name__ == "__main__":
                 dropout=args.dropout,
             ).to(device)
             opt = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
-            # reuse global gnn_model/optimizer for train_standard_gnn which uses global gnn_train/gnn_test
-            gnn_model = model
-            optimizer = opt
-            best_acc, best_mac, best_w, t = train_standard_gnn(gnn_model, graph_data, optimizer, args, save_path, 0)
+            best_acc, best_mac, best_w, t = train_standard_gnn(model, graph_data, opt, args, save_path, 0)
             print(f"[Hetero-Ensemble {gtype}] Acc {best_acc:.2f}  Macro-F1 {best_mac:.2f}  Time {t:.3f}s")
             print(f"  Saved → {save_path}")
             del model, opt
@@ -252,21 +250,29 @@ if __name__ == "__main__":
         write_file = open(f"../results/GNN/{args.dataset}_{args.shots}_shot{'' if not args.re_split else '_s'}.csv",
                          mode='a', newline='')
 
+    # Ensemble mode: create split once, vary only model init seed
+    if args.ensemble_k > 0:
+        set_seed(args.seed)
+        graph_data = create_few_shot_dataset(
+            args.dataset, shots=args.shots, seed=args.seed,
+            device=device, path_prefix=".."
+        ).to(device)
+        num_classes = print_dataset_stats(graph_data)
+
     for i in range(effective_run_times):
         current_seed = args.seed + i
         set_seed(current_seed)
-        print(f"\n=== Running with seed {current_seed} (Run {i+1}/{args.run_times}) ===\n")
+        print(f"\n=== Running with seed {current_seed} (Run {i+1}/{effective_run_times}) ===\n")
 
-        graph_data = create_few_shot_dataset(
-            args.dataset,
-            shots=args.shots,
-            seed=current_seed,
-            device=device,
-            path_prefix=".."
-        )
-        graph_data = graph_data.to(device)
-
-        num_classes = print_dataset_stats(graph_data)
+        if args.ensemble_k == 0:
+            graph_data = create_few_shot_dataset(
+                args.dataset,
+                shots=args.shots,
+                seed=current_seed,
+                device=device,
+                path_prefix=".."
+            ).to(device)
+            num_classes = print_dataset_stats(graph_data)
 
         if args.ensemble_k > 0:
             model_save_path = f"../results/GNN/{args.dataset}_{args.shots}_shot_best_model_ensemble{i}.pt"

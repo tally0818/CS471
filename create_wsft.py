@@ -108,57 +108,17 @@ def prepare_dpo_dataset(agreed_nodes, disagreed_nodes, gnn_predictions, graph_da
         json.dump(sft_dataset, f, indent=2)
 
 
-def load_ensemble_predictions(graph_data, args):
-    """Load K GNN checkpoints (homo-ensemble) and return soft-voted probability tensor."""
+def _load_ensemble_models(graph_data, args, model_specs):
+    """Load ensemble GNN models and return (models list, soft-voted probs).
+
+    model_specs: list of (gnn_type, checkpoint_path) tuples.
+    """
     num_classes = 47 if args.dataset == "ogbn-products_subset" else graph_data.y.max().item() + 1
-    ensemble_dir = args.ensemble_model_dir
-    model_paths = []
-    for i in range(args.ensemble_k):
-        path = os.path.join(ensemble_dir, f"{args.dataset}_{args.shots}_shot_best_model_ensemble{i}.pt")
+    models = []
+    prob_sum = None
+    for gtype, path in model_specs:
         if not os.path.exists(path):
             raise FileNotFoundError(f"Ensemble checkpoint not found: {path}")
-        model_paths.append(path)
-
-    print(f"[Homo-Ensemble] Loading {args.ensemble_k} GNN models from {ensemble_dir}")
-    prob_sum = None
-    for i, path in enumerate(model_paths):
-        model = GNNEncoder(
-            input_dim=graph_data.x.shape[1],
-            hidden_dim=args.hidden_dim,
-            output_dim=num_classes,
-            n_layers=args.n_layers,
-            gnn_type=args.gnn_type,
-        ).to(args.device)
-        model.load_state_dict(torch.load(path, map_location=args.device))
-        model.eval()
-        with torch.no_grad():
-            logits = model(graph_data.x, graph_data.edge_index)
-            probs = F.softmax(logits, dim=1)
-        if prob_sum is None:
-            prob_sum = probs
-        else:
-            prob_sum = prob_sum + probs
-        print(f"  Loaded ensemble member {i}: {path}")
-        del model
-
-    ensemble_probs = prob_sum / args.ensemble_k
-    print(f"[Homo-Ensemble] Soft voting done — avg of {args.ensemble_k} models")
-    return ensemble_probs
-
-
-def load_hetero_ensemble_predictions(graph_data, args):
-    """Load GCN/GAT/SAGE checkpoints and return soft-voted probability tensor."""
-    num_classes = 47 if args.dataset == "ogbn-products_subset" else graph_data.y.max().item() + 1
-    hetero_types = args.hetero_models  # e.g. ["GCN", "GAT", "SAGE"]
-    ensemble_dir = args.ensemble_model_dir
-
-    print(f"[Hetero-Ensemble] Loading {hetero_types} from {ensemble_dir}")
-    prob_sum = None
-    count = 0
-    for gtype in hetero_types:
-        path = os.path.join(ensemble_dir, f"{args.dataset}_{args.shots}_shot_best_model_{gtype}.pt")
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Hetero-ensemble checkpoint not found: {path}")
         model = GNNEncoder(
             input_dim=graph_data.x.shape[1],
             hidden_dim=args.hidden_dim,
@@ -169,26 +129,64 @@ def load_hetero_ensemble_predictions(graph_data, args):
         model.load_state_dict(torch.load(path, map_location=args.device))
         model.eval()
         with torch.no_grad():
-            logits = model(graph_data.x, graph_data.edge_index)
-            probs = F.softmax(logits, dim=1)
+            probs = F.softmax(model(graph_data.x, graph_data.edge_index), dim=1)
         if prob_sum is None:
             prob_sum = probs
         else:
             prob_sum = prob_sum + probs
-        count += 1
+        models.append(model)
         print(f"  Loaded {gtype}: {path}")
-        del model
+    ensemble_probs = prob_sum / len(models)
+    return models, ensemble_probs
 
-    ensemble_probs = prob_sum / count
-    print(f"[Hetero-Ensemble] Soft voting done — avg of {count} models ({hetero_types})")
-    return ensemble_probs
+
+def _ensemble_vote(models, graph_data):
+    """Run soft voting across already-loaded models, return averaged probs."""
+    prob_sum = None
+    for model in models:
+        model.eval()
+        with torch.no_grad():
+            probs = F.softmax(model(graph_data.x, graph_data.edge_index), dim=1)
+        if prob_sum is None:
+            prob_sum = probs
+        else:
+            prob_sum = prob_sum + probs
+    return prob_sum / len(models)
+
+
+def load_ensemble_predictions(graph_data, args):
+    """Load K GNN checkpoints (homo-ensemble) and return (models, soft-voted probs)."""
+    ensemble_dir = args.ensemble_model_dir
+    specs = []
+    for i in range(args.ensemble_k):
+        path = os.path.join(ensemble_dir, f"{args.dataset}_{args.shots}_shot_best_model_ensemble{i}.pt")
+        specs.append((args.gnn_type, path))
+    print(f"[Homo-Ensemble] Loading {args.ensemble_k} GNN models from {ensemble_dir}")
+    models, probs = _load_ensemble_models(graph_data, args, specs)
+    print(f"[Homo-Ensemble] Soft voting done — avg of {args.ensemble_k} models")
+    return models, probs
+
+
+def load_hetero_ensemble_predictions(graph_data, args):
+    """Load GCN/GAT/SAGE checkpoints and return (models, soft-voted probs)."""
+    hetero_types = args.hetero_models
+    ensemble_dir = args.ensemble_model_dir
+    specs = []
+    for gtype in hetero_types:
+        path = os.path.join(ensemble_dir, f"{args.dataset}_{args.shots}_shot_best_model_{gtype}.pt")
+        specs.append((gtype, path))
+    print(f"[Hetero-Ensemble] Loading {hetero_types} from {ensemble_dir}")
+    models, probs = _load_ensemble_models(graph_data, args, specs)
+    print(f"[Hetero-Ensemble] Soft voting done — avg of {len(models)} models ({hetero_types})")
+    return models, probs
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, required=True)
     parser.add_argument("--selected_nodes_path", type=str, required=True)
-    parser.add_argument("--pretrained_model", type=str, required=True)
+    parser.add_argument("--pretrained_model", type=str, default=None,
+                        help="Single GNN checkpoint path (required unless using ensemble)")
     parser.add_argument("--llm_predictions", type=str, required=True)
     parser.add_argument("--dpo_output_path", type=str, required=True)
     parser.add_argument("--sft_output_path", type=str, required=True)
@@ -207,7 +205,7 @@ def main():
                         help="Number of GNN models in ensemble (3 or 5)")
     parser.add_argument("--ensemble_model_dir", type=str, default=None,
                         help="Directory containing ensemble checkpoints (default: results/GNN)")
-    parser.add_argument("--voting_method", type=str, default="soft", choices=["soft", "hard"],
+    parser.add_argument("--voting_method", type=str, default="soft", choices=["soft"],
                         help="Ensemble voting method")
     # Hetero-Ensemble flags
     parser.add_argument("--hetero_models", type=str, nargs="+", default=None,
@@ -235,15 +233,19 @@ def main():
         num_classes = graph_data.y.max().item() + 1
 
     # --- Hetero-Ensemble vs Homo-Ensemble vs Single GNN ---
+    if not args.hetero_models and not args.use_ensemble and args.pretrained_model is None:
+        parser.error("--pretrained_model is required when not using ensemble mode")
+
     is_prob = False
+    ensemble_models = None
     if args.hetero_models:
         print(f"[Hetero-Ensemble mode] models={args.hetero_models}, voting={args.voting_method}")
-        gnn_predictions = load_hetero_ensemble_predictions(graph_data, args)
+        ensemble_models, gnn_predictions = load_hetero_ensemble_predictions(graph_data, args)
         is_prob = True
         gnn_model = None
     elif args.use_ensemble:
         print(f"[Homo-Ensemble mode] K={args.ensemble_k}, voting={args.voting_method}")
-        gnn_predictions = load_ensemble_predictions(graph_data, args)
+        ensemble_models, gnn_predictions = load_ensemble_predictions(graph_data, args)
         is_prob = True
         gnn_model = None
     else:
@@ -272,19 +274,53 @@ def main():
     disagreed_nodes = {nid: disagreed_nodes[nid] for nid in selected_nodes_ids if nid in disagreed_nodes}
     print(f"Initial: {len(agreed_nodes)} agreed, {len(disagreed_nodes)} disagreed")
 
-    if len(agreed_nodes) > 0 and gnn_model is not None:
-        print(f"Retraining GNN on {len(agreed_nodes)} agreed nodes...")
-        retrain_gnn_on_agreed(gnn_model, graph_data, agreed_nodes, args.device, lr=1e-3, epochs=50)
-        with torch.no_grad():
-            gnn_predictions = gnn_model(graph_data.x, graph_data.edge_index)
-        is_prob = False  # retrained single model → logits again
-        agreed_nodes_all, disagreed_nodes_all = find_agreed_and_disagreed_nodes(
-            gnn_predictions, llm_predictions, graph_data, is_probability=is_prob)
-        agreed_nodes = {nid: agreed_nodes_all[nid] for nid in selected_nodes_ids if nid in agreed_nodes_all}
-        disagreed_nodes = {nid: disagreed_nodes_all[nid] for nid in selected_nodes_ids if nid in disagreed_nodes_all}
-        print(f"After retrain: {len(agreed_nodes)} agreed, {len(disagreed_nodes)} disagreed")
-    elif len(agreed_nodes) > 0 and (args.use_ensemble or args.hetero_models):
-        print("[Ensemble mode] Skipping single-model retrain — using ensemble probs directly")
+    if gnn_model is not None:
+        if len(agreed_nodes) > 0:
+            print(f"Retraining GNN on {len(agreed_nodes)} agreed nodes...")
+            retrain_gnn_on_agreed(gnn_model, graph_data, agreed_nodes, args.device, lr=1e-3, epochs=50)
+            with torch.no_grad():
+                gnn_predictions = gnn_model(graph_data.x, graph_data.edge_index)
+            is_prob = False
+            agreed_nodes_all, disagreed_nodes_all = find_agreed_and_disagreed_nodes(
+                gnn_predictions, llm_predictions, graph_data, is_probability=is_prob)
+            agreed_nodes = {nid: agreed_nodes_all[nid] for nid in selected_nodes_ids if nid in agreed_nodes_all}
+            disagreed_nodes = {nid: disagreed_nodes_all[nid] for nid in selected_nodes_ids if nid in disagreed_nodes_all}
+            print(f"After retrain: {len(agreed_nodes)} agreed, {len(disagreed_nodes)} disagreed")
+    elif ensemble_models is not None:
+        print(f"[Ensemble] Retraining {len(ensemble_models)} models on per-model agreed nodes...")
+        retrained_any = False
+        all_agreed_sets = []
+        for i, model in enumerate(ensemble_models):
+            model.eval()
+            with torch.no_grad():
+                individual_preds = F.softmax(model(graph_data.x, graph_data.edge_index), dim=1)
+            individual_agreed, _ = find_agreed_and_disagreed_nodes(
+                individual_preds, llm_predictions, graph_data, is_probability=True)
+            individual_agreed = {nid: individual_agreed[nid] for nid in selected_nodes_ids if nid in individual_agreed}
+            all_agreed_sets.append(set(individual_agreed.keys()))
+            if len(individual_agreed) > 0:
+                retrain_gnn_on_agreed(model, graph_data, individual_agreed, args.device, lr=1e-3, epochs=50)
+                retrained_any = True
+                print(f"  Model {i}: {len(individual_agreed)} agreed nodes → retrained")
+            else:
+                print(f"  Model {i}: 0 agreed nodes → skipped")
+        # Log pairwise overlap between per-model agreed sets
+        if len(all_agreed_sets) > 1:
+            print("[Ensemble] Per-model agreed set overlap:")
+            for i in range(len(all_agreed_sets)):
+                for j in range(i + 1, len(all_agreed_sets)):
+                    intersection = len(all_agreed_sets[i] & all_agreed_sets[j])
+                    union = len(all_agreed_sets[i] | all_agreed_sets[j])
+                    overlap = intersection / union if union > 0 else 0.0
+                    print(f"  Model {i} vs {j}: {intersection}/{union} overlap (IoU={overlap:.2%})")
+        if retrained_any:
+            gnn_predictions = _ensemble_vote(ensemble_models, graph_data)
+            is_prob = True
+            agreed_nodes_all, disagreed_nodes_all = find_agreed_and_disagreed_nodes(
+                gnn_predictions, llm_predictions, graph_data, is_probability=is_prob)
+            agreed_nodes = {nid: agreed_nodes_all[nid] for nid in selected_nodes_ids if nid in agreed_nodes_all}
+            disagreed_nodes = {nid: disagreed_nodes_all[nid] for nid in selected_nodes_ids if nid in disagreed_nodes_all}
+            print(f"After ensemble retrain: {len(agreed_nodes)} agreed, {len(disagreed_nodes)} disagreed")
 
     final_disagreed_nodes = filter_disagreed_by_preference(
         disagreed_nodes, gnn_predictions, args.confidence_threshold, is_probability=is_prob)

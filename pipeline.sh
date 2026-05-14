@@ -15,6 +15,9 @@ SEED=${3:-"42"}
 USE_ENSEMBLE=${USE_ENSEMBLE:-false}
 ENSEMBLE_K=${ENSEMBLE_K:-3}
 VOTING_METHOD=${VOTING_METHOD:-"soft"}
+# Set USE_HETERO_ENSEMBLE=true to train GCN/GAT/SAGE separately and use as ensemble judges
+USE_HETERO_ENSEMBLE=${USE_HETERO_ENSEMBLE:-false}
+HETERO_MODELS=${HETERO_MODELS:-"GCN GAT SAGE"}
 
 
 # ===== ENVIRONMENT SETUP =====
@@ -59,10 +62,25 @@ GNN_RESULTS_DIR="$PROJECT_DIR/results/GNN"
 
 echo "=== Starting GNN-as-Judge Pipeline for $RUN_ID ==="
 echo "    Ensemble: $USE_ENSEMBLE (K=$ENSEMBLE_K, voting=$VOTING_METHOD)"
+echo "    Hetero-Ensemble: $USE_HETERO_ENSEMBLE (models=$HETERO_MODELS)"
 
 # STAGE 0 (optional): Train ensemble GNN models
-if [ "$USE_ENSEMBLE" = "true" ]; then
-  echo "--- Stage 0: Train Ensemble GNN (K=$ENSEMBLE_K) ---"
+if [ "$USE_HETERO_ENSEMBLE" = "true" ]; then
+  echo "--- Stage 0: Train Hetero-Ensemble GNN ($HETERO_MODELS) ---"
+  cd "$PROJECT_DIR/GNN"
+  python main.py \
+    --dataset "$DATASET" \
+    --shots "$SHOT_COUNT" \
+    --hidden_dim ${GNN_HIDDEN_DIM:-64} \
+    --n_layers ${GNN_LAYERS:-2} \
+    --epochs 200 \
+    --patience 100 \
+    --seed "$SEED" \
+    --hetero_ensemble \
+    --device "cuda:0"
+  cd "$PROJECT_DIR"
+elif [ "$USE_ENSEMBLE" = "true" ]; then
+  echo "--- Stage 0: Train Homo-Ensemble GNN (K=$ENSEMBLE_K) ---"
   cd "$PROJECT_DIR/GNN"
   python main.py \
     --dataset "$DATASET" \
@@ -214,7 +232,9 @@ CUDA_VISIBLE_DEVICES=0 python src/vllm_infer.py \
 echo "--- Stage 5: Create DPO Dataset ---"
 cd "$PROJECT_DIR"
 ENSEMBLE_FLAGS=""
-if [ "$USE_ENSEMBLE" = "true" ]; then
+if [ "$USE_HETERO_ENSEMBLE" = "true" ]; then
+  ENSEMBLE_FLAGS="--hetero_models $HETERO_MODELS --ensemble_model_dir $GNN_RESULTS_DIR --voting_method $VOTING_METHOD"
+elif [ "$USE_ENSEMBLE" = "true" ]; then
   ENSEMBLE_FLAGS="--use_ensemble --ensemble_k $ENSEMBLE_K --ensemble_model_dir $GNN_RESULTS_DIR --voting_method $VOTING_METHOD"
 fi
 
