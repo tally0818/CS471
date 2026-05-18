@@ -173,7 +173,7 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, default="cora")
     parser.add_argument("--encoder_name", type=str, default="", choices=["", "shallow", "LM", "LLM", "e5-large", "SentenceBert", "MiniLM", "roberta", "Qwen-3B", "Mistral-7B", "Qwen-7B", "Llama-8B"])
     parser.add_argument("--shots", type=int, default=5)
-    parser.add_argument("--gnn_type", type=str, default="GCN", choices=["GCN", "GAT", "SAGE", "TransformerConv", "SGConv", "HeteroGNN"])
+    parser.add_argument("--gnn_type", type=str, default="GCN", choices=["GCN", "GAT", "SAGE", "TransformerConv", "SGConv", "APPNP", "HeteroGNN"])
     parser.add_argument("--n_layers", type=int, default=2)
     parser.add_argument("--hidden_dim", type=int, default=128)
     parser.add_argument("--dropout", type=float, default=0.5)
@@ -198,6 +198,8 @@ if __name__ == "__main__":
                         help="Train K models for ensemble and save with _ensemble{i} suffix. 0 = disabled (default single-model mode)")
     parser.add_argument("--hetero_ensemble", action="store_true", default=False,
                         help="Train GCN, GAT, SAGE separately and save as best_model_{type}.pt")
+    parser.add_argument("--hetero2_ensemble", action="store_true", default=False,
+                        help="Train SGConv, GCN, APPNP separately and save as best_model_{type}.pt")
 
     args = parser.parse_args()
     print(args)
@@ -241,6 +243,37 @@ if __name__ == "__main__":
             print(f"  Saved → {save_path}")
             del model, opt
         print("\n[Hetero-Ensemble] All 3 models trained.")
+        sys.exit(0)
+
+    # ========== Hetero2-Ensemble mode (SGConv, GCN, APPNP) ==========
+    if args.hetero2_ensemble:
+        hetero2_types = ["SGConv", "GCN", "APPNP"]
+        print(f"\n[Hetero2-Ensemble] Training {hetero2_types} separately\n")
+        set_seed(args.seed)
+        graph_data = create_few_shot_dataset(
+            args.dataset, shots=args.shots, seed=args.seed,
+            device=device, path_prefix=".."
+        ).to(device)
+        num_classes = print_dataset_stats(graph_data)
+
+        for gtype in hetero2_types:
+            set_seed(args.seed)
+            print(f"[Hetero2-Ensemble {gtype}] Using seed {args.seed}")
+            save_path = f"../results/GNN/{args.dataset}_{args.shots}_shot_best_model_{gtype}.pt"
+            model = GNNEncoder(
+                input_dim=graph_data.x.shape[1],
+                hidden_dim=args.hidden_dim,
+                output_dim=num_classes,
+                n_layers=args.n_layers,
+                gnn_type=gtype,
+                dropout=args.dropout,
+            ).to(device)
+            opt = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+            best_acc, best_mac, best_w, t = train_standard_gnn(model, graph_data, opt, args, save_path, 0)
+            print(f"[Hetero2-Ensemble {gtype}] Acc {best_acc:.2f}  Macro-F1 {best_mac:.2f}  Time {t:.3f}s")
+            print(f"  Saved → {save_path}")
+            del model, opt
+        print("\n[Hetero2-Ensemble] All 3 models trained.")
         sys.exit(0)
 
     # Determine run count: ensemble_k overrides run_times when ensemble mode is on
