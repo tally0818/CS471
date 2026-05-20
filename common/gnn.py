@@ -19,6 +19,8 @@ def build_conv(conv_type: str):
         return SAGEConv
     elif conv_type == "SGConv":
         return SGConv
+    elif conv_type == "APPNP":
+        return APPNP
     else:
         raise KeyError("GNN_TYPE can only be GAT, GCN, SAGE, GIN, SGConv, APPNP, and TransformerConv")
 

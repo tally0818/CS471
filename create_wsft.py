@@ -168,7 +168,7 @@ def load_ensemble_predictions(graph_data, args):
 
 
 def load_hetero_ensemble_predictions(graph_data, args):
-    """Load GCN/GAT/SAGE checkpoints and return (models, soft-voted probs)."""
+    """Load heterogeneous GNN checkpoints and return (models, soft-voted probs)."""
     hetero_types = args.hetero_models
     ensemble_dir = args.ensemble_model_dir
     specs = []
@@ -192,7 +192,7 @@ def main():
     parser.add_argument("--sft_output_path", type=str, required=True)
     parser.add_argument("--confidence_threshold", type=float, default=0.5)
     parser.add_argument("--shots", type=int, default=None)
-    parser.add_argument("--gnn_type", type=str, default="GCN", choices=["GCN", "GAT", "SAGE","SGConv"])
+    parser.add_argument("--gnn_type", type=str, default="GCN", choices=["GCN", "GAT", "SAGE", "SGConv", "APPNP"])
     parser.add_argument("--hidden_dim", type=int, default=128)
     parser.add_argument("--n_layers", type=int, default=2)
     parser.add_argument("--path_prefix", type=str, default=".")
